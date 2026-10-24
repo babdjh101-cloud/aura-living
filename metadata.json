@@ -1,0 +1,8 @@
+{
+  "name": "AURA Living - Production E-Commerce Platform",
+  "description": "Production-ready Scandinavian luxury lifestyle & artisanal homeware e-commerce platform with dynamic Supabase database, secure admin panel, and Cloudflare Pages deployment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

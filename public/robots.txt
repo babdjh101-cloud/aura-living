@@ -1,0 +1,18 @@
+# robots.txt for AURA Living Store
+User-agent: *
+Allow: /
+Allow: /products
+Allow: /categories
+Allow: /about
+Allow: /contact
+Allow: /privacy
+Allow: /terms
+Allow: /returns
+
+# Disallow private admin panel and sensitive paths
+Disallow: /admin/
+Disallow: /admin
+Disallow: /checkout
+Disallow: /order-confirmation
+
+Sitemap: https://yourdomain.com/sitemap.xml
