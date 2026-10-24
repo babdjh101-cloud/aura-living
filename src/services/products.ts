@@ -91,11 +91,21 @@ export async function fetchProducts(options: ProductFilterOptions = {}): Promise
       const { data, error, count } = await query;
 
       if (!error && data) {
-        const formatted = data.map((item: any) => ({
-          ...item,
-          category: item.categories || null,
-        })) as Product[];
-        return { products: formatted, total: count || formatted.length };
+        if (data.length > 0) {
+          const formatted = data.map((item: any) => ({
+            ...item,
+            category: item.categories || null,
+          })) as Product[];
+          return { products: formatted, total: count || formatted.length };
+        }
+        
+        // If Supabase table is empty (e.g. newly initialized database before running seed data),
+        // fallback to curated showcase products so the website is never blank.
+        if (!options.search && (!options.categorySlug || options.categorySlug === 'all')) {
+          console.info('Supabase products table is currently empty; displaying showcase products.');
+        } else {
+          return { products: [], total: 0 };
+        }
       } else if (error) {
         console.warn('Supabase products query failed, using local cache:', error.message);
       }
