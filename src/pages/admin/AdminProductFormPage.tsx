@@ -258,6 +258,7 @@ export const AdminProductFormPage: React.FC = () => {
                 onChange={(e) => setFormData({ ...formData, category_id: e.target.value })}
                 className="w-full px-3.5 py-2 text-xs bg-stone-50 border border-stone-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-stone-900 focus:bg-white"
               >
+                <option value="">Unassigned / General</option>
                 {categories.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}

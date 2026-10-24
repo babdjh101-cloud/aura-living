@@ -37,6 +37,33 @@ export async function fetchCategories(): Promise<Category[]> {
         saveLocalCategories(data);
         return data as Category[];
       }
+
+      if (data && data.length === 0) {
+        // Table exists in Supabase but has 0 rows: try to seed default categories into Supabase
+        try {
+          const { data: seeded, error: seedErr } = await supabase
+            .from('categories')
+            .upsert(
+              INITIAL_CATEGORIES.map((c) => ({
+                id: c.id,
+                name: c.name,
+                slug: c.slug,
+                description: c.description,
+                image_url: c.image_url,
+                display_order: c.display_order,
+              })),
+              { onConflict: 'slug' }
+            )
+            .select();
+
+          if (!seedErr && seeded && seeded.length > 0) {
+            saveLocalCategories(seeded as Category[]);
+            return seeded as Category[];
+          }
+        } catch {
+          // Non-critical if table is restricted
+        }
+      }
     } catch (err) {
       console.warn('Failed to query Supabase categories:', err);
     }

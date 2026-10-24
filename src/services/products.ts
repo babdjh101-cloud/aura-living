@@ -1,6 +1,6 @@
 import { Product } from '../types';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
-import { INITIAL_PRODUCTS } from './mockData';
+import { INITIAL_PRODUCTS, INITIAL_CATEGORIES } from './mockData';
 import { fetchCategories } from './categories';
 import { deleteProductImage } from './storage';
 
@@ -272,18 +272,132 @@ function sanitizeProductPayload(updates: Record<string, any>): Record<string, an
   return cleaned;
 }
 
+/**
+ * Validates whether a category_id exists in the database categories table before insertion/update.
+ * If the category does not exist in the database, it attempts to provision the category from
+ * default initial categories. If it still cannot be satisfied, returns null to avoid foreign key violations.
+ */
+export async function ensureCategoryIdValid(categoryId: string | null | undefined): Promise<string | null> {
+  if (!categoryId || typeof categoryId !== 'string' || categoryId.trim() === '') {
+    return null;
+  }
+
+  const trimmedId = categoryId.trim();
+
+  if (!isSupabaseConfigured()) {
+    return trimmedId;
+  }
+
+  try {
+    // 1. Check if category exists directly by ID in Supabase
+    const { data: directMatch, error: directErr } = await supabase
+      .from('categories')
+      .select('id')
+      .eq('id', trimmedId)
+      .maybeSingle();
+
+    if (!directErr && directMatch) {
+      return directMatch.id;
+    }
+
+    // 2. ID not found directly in Supabase categories table.
+    // Check if it matches an initial category by ID or slug.
+    const matchingInitial =
+      INITIAL_CATEGORIES.find((c) => c.id === trimmedId || c.slug === trimmedId);
+
+    if (matchingInitial) {
+      // Check if this category exists by slug in Supabase (with potentially different UUID)
+      const { data: catBySlug } = await supabase
+        .from('categories')
+        .select('id')
+        .eq('slug', matchingInitial.slug)
+        .maybeSingle();
+
+      if (catBySlug) {
+        return catBySlug.id;
+      }
+
+      // Try inserting the category into Supabase so the foreign key constraint is satisfied
+      const { data: inserted, error: insertErr } = await supabase
+        .from('categories')
+        .upsert(
+          {
+            id: matchingInitial.id,
+            name: matchingInitial.name,
+            slug: matchingInitial.slug,
+            description: matchingInitial.description || '',
+            image_url: matchingInitial.image_url || '',
+            display_order: matchingInitial.display_order || 0,
+          },
+          { onConflict: 'slug' }
+        )
+        .select('id')
+        .maybeSingle();
+
+      if (!insertErr && inserted) {
+        return inserted.id;
+      }
+    }
+
+    // 3. Fallback: Check if ANY valid category exists in Supabase
+    const { data: anyCategory } = await supabase
+      .from('categories')
+      .select('id')
+      .limit(1)
+      .maybeSingle();
+
+    if (anyCategory) {
+      console.warn(`Category "${trimmedId}" not found in Supabase. Linking to existing category "${anyCategory.id}".`);
+      return anyCategory.id;
+    }
+
+    // 4. Categories table is empty or category cannot be satisfied:
+    // Return null to avoid Postgres products_category_id_fkey foreign key constraint violation
+    console.warn(`Category "${trimmedId}" does not exist in Supabase. Using null to avoid foreign key violation.`);
+    return null;
+  } catch (err) {
+    console.warn('Category foreign key validation error:', err);
+    return null;
+  }
+}
+
 export async function createProduct(
   productData: Omit<Product, 'id' | 'created_at' | 'updated_at' | 'category'>
 ): Promise<Product> {
   const cleaned = sanitizeProductPayload(productData as Record<string, any>);
 
   if (isSupabaseConfigured()) {
+    if (cleaned.category_id) {
+      cleaned.category_id = await ensureCategoryIdValid(cleaned.category_id);
+    }
+
     const { data, error } = await supabase
       .from('products')
       .insert([cleaned])
       .select('*, categories(*)');
 
     if (error) {
+      // Foreign key violation recovery: retry with category_id = null so product creation never fails
+      if (error.code === '23503') {
+        console.warn('Foreign key violation on category_id during createProduct; retrying with category_id = null');
+        const fallbackPayload = { ...cleaned, category_id: null };
+        const { data: retryData, error: retryErr } = await supabase
+          .from('products')
+          .insert([fallbackPayload])
+          .select('*, categories(*)');
+
+        if (!retryErr && retryData && retryData.length > 0) {
+          const created = {
+            ...retryData[0],
+            category: null,
+          } as Product;
+          const list = getLocalProducts();
+          list.unshift(created);
+          saveLocalProducts(list);
+          return created;
+        }
+      }
+
       const isLocalAdmin = typeof window !== 'undefined' && Boolean(localStorage.getItem('aura_local_admin_session'));
       if (isLocalAdmin) {
         const newProduct: Product = {
@@ -347,6 +461,10 @@ export async function updateProduct(
   const cleanedUpdates = sanitizeProductPayload(updates as Record<string, any>);
 
   if (isSupabaseConfigured()) {
+    if (cleanedUpdates.category_id !== undefined) {
+      cleanedUpdates.category_id = await ensureCategoryIdValid(cleanedUpdates.category_id);
+    }
+
     // Execute update without blind .single() to inspect returned row count
     const { data, error } = await supabase
       .from('products')
@@ -355,6 +473,31 @@ export async function updateProduct(
       .select('*, categories(*)');
 
     if (error) {
+      // Foreign key violation recovery: retry with category_id = null so product update never crashes
+      if (error.code === '23503') {
+        console.warn('Foreign key violation on category_id during updateProduct; retrying with category_id = null');
+        const fallbackUpdates = { ...cleanedUpdates, category_id: null };
+        const { data: retryData, error: retryErr } = await supabase
+          .from('products')
+          .update(fallbackUpdates)
+          .eq('id', id)
+          .select('*, categories(*)');
+
+        if (!retryErr && retryData && retryData.length > 0) {
+          const updatedProduct = {
+            ...retryData[0],
+            category: null,
+          } as Product;
+          const list = getLocalProducts();
+          const idx = list.findIndex((p) => p.id === id);
+          if (idx !== -1) {
+            list[idx] = updatedProduct;
+            saveLocalProducts(list);
+          }
+          return updatedProduct;
+        }
+      }
+
       if (error.code === '23505') {
         throw new Error(`Failed to update product: A product with this SKU or slug already exists (${error.message}).`);
       }
