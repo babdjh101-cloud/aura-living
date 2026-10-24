@@ -54,13 +54,23 @@ export async function createCategory(cat: Omit<Category, 'id' | 'created_at' | '
     const { data, error } = await supabase
       .from('categories')
       .insert([cat])
-      .select()
-      .single();
+      .select();
 
     if (error) {
+      if (error.code === '42501' || error.message.includes('permission denied')) {
+        throw new Error('Permission denied: Administrator privileges required to create categories.');
+      }
+      if (error.code === '23505') {
+        throw new Error(`Category creation failed: A category with this slug or name already exists.`);
+      }
       throw new Error(`Failed to create category: ${error.message}`);
     }
-    return data as Category;
+
+    if (!data || data.length === 0) {
+      throw new Error('Failed to create category: Database did not return inserted record. Check administrator permissions.');
+    }
+
+    return data[0] as Category;
   }
 
   const newCat: Category = {
@@ -76,18 +86,43 @@ export async function createCategory(cat: Omit<Category, 'id' | 'created_at' | '
 }
 
 export async function updateCategory(id: string, updates: Partial<Category>): Promise<Category> {
+  if (!id || typeof id !== 'string') {
+    throw new Error('Valid Category ID is required to update a category.');
+  }
+
   if (isSupabaseConfigured()) {
     const { data, error } = await supabase
       .from('categories')
       .update(updates)
       .eq('id', id)
-      .select()
-      .single();
+      .select();
 
     if (error) {
+      if (error.code === '23505') {
+        throw new Error(`A category with this name or slug already exists: ${error.message}`);
+      }
+      if (error.code === '42501' || error.message.includes('permission denied')) {
+        throw new Error('Permission denied: Administrator privileges required to update categories.');
+      }
       throw new Error(`Failed to update category: ${error.message}`);
     }
-    return data as Category;
+
+    if (!data || data.length === 0) {
+      const { data: existing } = await supabase.from('categories').select('id, name').eq('id', id).maybeSingle();
+      if (!existing) {
+        throw new Error(`Category update failed: Category with ID "${id}" was not found in the database.`);
+      }
+      throw new Error('Category update failed: Permission denied by row-level security policy.');
+    }
+
+    const updated = data[0] as Category;
+    const list = getLocalCategories();
+    const idx = list.findIndex((c) => c.id === id);
+    if (idx !== -1) {
+      list[idx] = updated;
+      saveLocalCategories(list);
+    }
+    return updated;
   }
 
   const list = getLocalCategories();
@@ -99,9 +134,29 @@ export async function updateCategory(id: string, updates: Partial<Category>): Pr
 }
 
 export async function deleteCategory(id: string): Promise<void> {
+  if (!id || typeof id !== 'string') {
+    throw new Error('Valid Category ID is required to delete a category.');
+  }
+
   if (isSupabaseConfigured()) {
-    const { error } = await supabase.from('categories').delete().eq('id', id);
-    if (error) throw new Error(`Failed to delete category: ${error.message}`);
+    const { data, error } = await supabase.from('categories').delete().eq('id', id).select('id');
+    if (error) {
+      if (error.code === '42501' || error.message.includes('permission denied')) {
+        throw new Error('Permission denied: Administrator privileges required to delete categories.');
+      }
+      throw new Error(`Failed to delete category: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) {
+      const { data: existing } = await supabase.from('categories').select('id').eq('id', id).maybeSingle();
+      if (!existing) {
+        throw new Error(`Category delete failed: Category with ID "${id}" was not found in the database.`);
+      }
+      throw new Error('Category delete failed: Permission denied by row-level security policy.');
+    }
+
+    const list = getLocalCategories().filter((c) => c.id !== id);
+    saveLocalCategories(list);
     return;
   }
 

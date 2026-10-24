@@ -6,7 +6,7 @@ import { deleteProductImage } from './storage';
 
 const LOCAL_STORAGE_KEY = 'aura_products_cache';
 
-function getLocalProducts(): Product[] {
+export function getLocalProducts(): Product[] {
   const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
   if (cached) {
     try {
@@ -19,7 +19,7 @@ function getLocalProducts(): Product[] {
   return INITIAL_PRODUCTS;
 }
 
-function saveLocalProducts(products: Product[]) {
+export function saveLocalProducts(products: Product[]) {
   localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(products));
 }
 
@@ -230,23 +230,67 @@ export async function fetchProductById(id: string): Promise<Product | null> {
   };
 }
 
+function sanitizeProductPayload(updates: Record<string, any>): Record<string, any> {
+  const allowedColumns = [
+    'name',
+    'slug',
+    'sku',
+    'description',
+    'category_id',
+    'regular_price',
+    'discount_price',
+    'main_image',
+    'additional_images',
+    'stock_quantity',
+    'availability_status',
+    'is_featured',
+    'is_published',
+  ];
+  const cleaned: Record<string, any> = {};
+  for (const key of allowedColumns) {
+    if (key in updates && updates[key] !== undefined) {
+      cleaned[key] = updates[key];
+    }
+  }
+  return cleaned;
+}
+
 export async function createProduct(
   productData: Omit<Product, 'id' | 'created_at' | 'updated_at' | 'category'>
 ): Promise<Product> {
+  const cleaned = sanitizeProductPayload(productData as Record<string, any>);
+
   if (isSupabaseConfigured()) {
     const { data, error } = await supabase
       .from('products')
-      .insert([productData])
-      .select('*, categories(*)')
-      .single();
+      .insert([cleaned])
+      .select('*, categories(*)');
 
     if (error) {
+      if (error.code === '23505') {
+        throw new Error(`Failed to create product: A product with this SKU or slug already exists (${error.message}).`);
+      }
+      if (error.code === '42501' || error.message.includes('permission denied') || error.message.includes('row-level security')) {
+        throw new Error(
+          'Failed to create product: Permission denied. Your account is not recognized as an administrator in the database.'
+        );
+      }
       throw new Error(`Failed to create product: ${error.message}`);
     }
-    return {
-      ...data,
-      category: data.categories || null,
+
+    if (!data || data.length === 0) {
+      throw new Error('Failed to create product: No record returned from database.');
+    }
+
+    const created = {
+      ...data[0],
+      category: data[0].categories || null,
     } as Product;
+
+    const list = getLocalProducts();
+    list.unshift(created);
+    saveLocalProducts(list);
+    return created;
   }
 
   const newProduct: Product = {
@@ -266,30 +310,106 @@ export async function updateProduct(
   id: string,
   updates: Partial<Omit<Product, 'id' | 'created_at' | 'category'>>
 ): Promise<Product> {
-  if (isSupabaseConfigured()) {
-    const { data, error } = await supabase
-      .from('products')
-      .update(updates)
-      .eq('id', id)
-      .select('*, categories(*)')
-      .single();
-
-    if (error) {
-      throw new Error(`Failed to update product: ${error.message}`);
-    }
-    return {
-      ...data,
-      category: data.categories || null,
-    } as Product;
+  if (!id || typeof id !== 'string' || id.trim() === '') {
+    throw new Error('Valid Product ID is required to update a product.');
   }
 
+  const cleanedUpdates = sanitizeProductPayload(updates as Record<string, any>);
+
+  if (isSupabaseConfigured()) {
+    // Execute update without blind .single() to inspect returned row count
+    const { data, error } = await supabase
+      .from('products')
+      .update(cleanedUpdates)
+      .eq('id', id)
+      .select('*, categories(*)');
+
+    if (error) {
+      if (error.code === '23505') {
+        throw new Error(`Failed to update product: A product with this SKU or slug already exists (${error.message}).`);
+      }
+      if (error.code === '23503') {
+        throw new Error(`Failed to update product: The selected category does not exist in the database (${error.message}).`);
+      }
+      throw new Error(`Failed to update product: ${error.message}`);
+    }
+
+    // Explicitly verify exactly 1 row was updated
+    if (!data || data.length === 0) {
+      // 0 rows updated: Diagnosing the exact root cause
+      // 1. Check if product exists in public.products table
+      const { data: existingRow, error: checkErr } = await supabase
+        .from('products')
+        .select('id, name')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (!existingRow) {
+        throw new Error(
+          `Product update failed: Product with ID "${id}" was not found in the database. ` +
+          `If this product is from local fallback demo data, please insert it via the Admin Panel or run seed migrations.`
+        );
+      }
+
+      // 2. Product exists, so RLS policy blocked the update
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        throw new Error(
+          `Product update failed: Permission denied. No authenticated administrator session found. Please log in.`
+        );
+      }
+
+      // 3. User is authenticated, check if in admin_users roster
+      const { data: adminRecord } = await supabase
+        .from('admin_users')
+        .select('role')
+        .eq('id', session.user.id)
+        .maybeSingle();
+
+      if (!adminRecord) {
+        throw new Error(
+          `Product update failed: Permission denied. Your account (${session.user.email || session.user.id}) ` +
+          `is not registered in the 'admin_users' table. An existing super admin must grant you admin access.`
+        );
+      }
+
+      throw new Error(
+        `Product update failed: Row-level security prevented modifying product "${existingRow.name}" (ID: ${id}).`
+      );
+    }
+
+    if (data.length > 1) {
+      throw new Error(
+        `Product update integrity error: Expected 1 updated product, but ${data.length} were returned.`
+      );
+    }
+
+    const updatedProduct = {
+      ...data[0],
+      category: data[0].categories || null,
+    } as Product;
+
+    // Keep local cache synchronized
+    const list = getLocalProducts();
+    const idx = list.findIndex((p) => p.id === id);
+    if (idx !== -1) {
+      list[idx] = updatedProduct;
+      saveLocalProducts(list);
+    }
+
+    return updatedProduct;
+  }
+
+  // Fallback for offline demo mode
   const list = getLocalProducts();
   const idx = list.findIndex((p) => p.id === id);
-  if (idx === -1) throw new Error('Product not found');
+  if (idx === -1) {
+    throw new Error(`Product not found: ID "${id}" does not exist in local inventory.`);
+  }
 
   list[idx] = {
     ...list[idx],
-    ...updates,
+    ...cleanedUpdates,
     updated_at: new Date().toISOString(),
   };
   saveLocalProducts(list);
@@ -297,6 +417,10 @@ export async function updateProduct(
 }
 
 export async function deleteProduct(id: string): Promise<void> {
+  if (!id || typeof id !== 'string') {
+    throw new Error('Valid Product ID is required to delete a product.');
+  }
+
   const existing = await fetchProductById(id);
   if (existing?.main_image) {
     try {
@@ -307,10 +431,30 @@ export async function deleteProduct(id: string): Promise<void> {
   }
 
   if (isSupabaseConfigured()) {
-    const { error } = await supabase.from('products').delete().eq('id', id);
+    const { data, error } = await supabase
+      .from('products')
+      .delete()
+      .eq('id', id)
+      .select('id');
+
     if (error) {
+      if (error.code === '42501' || error.message.includes('permission denied')) {
+        throw new Error('Permission denied: Administrator privileges required to delete products.');
+      }
       throw new Error(`Failed to delete product: ${error.message}`);
     }
+
+    if (!data || data.length === 0) {
+      // Check if product exists or was blocked
+      const { data: existingRow } = await supabase.from('products').select('id').eq('id', id).maybeSingle();
+      if (!existingRow) {
+        throw new Error(`Product delete failed: Product with ID "${id}" was not found in the database.`);
+      }
+      throw new Error('Product delete failed: Permission denied by row-level security policy.');
+    }
+
+    const list = getLocalProducts().filter((p) => p.id !== id);
+    saveLocalProducts(list);
     return;
   }
 

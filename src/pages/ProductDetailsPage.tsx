@@ -24,6 +24,7 @@ export const ProductDetailsPage: React.FC = () => {
   const [product, setProduct] = useState<Product | null>(null);
   const [relatedProducts, setRelatedProducts] = useState<Product[]>([]);
   const [selectedImage, setSelectedImage] = useState<string>('');
+  const [imageError, setImageError] = useState(false);
   const [quantity, setQuantity] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [addedAnimation, setAddedAnimation] = useState(false);
@@ -161,12 +162,23 @@ export const ProductDetailsPage: React.FC = () => {
         {/* Left Column: Gallery */}
         <div className="lg:col-span-7 space-y-4">
           {/* Main Visual Preview */}
-          <div className="aspect-4/3 rounded-2xl bg-stone-100 overflow-hidden border border-stone-200/80 shadow-2xs">
-            <img
-              src={selectedImage || product.main_image}
-              alt={product.name}
-              className="w-full h-full object-cover object-center"
-            />
+          <div className="aspect-4/3 rounded-2xl bg-stone-100 overflow-hidden border border-stone-200/80 shadow-2xs relative">
+            {!imageError ? (
+              <img
+                src={selectedImage || product.main_image}
+                alt={product.name}
+                onError={() => setImageError(true)}
+                className="w-full h-full object-cover object-center"
+              />
+            ) : (
+              <div className="w-full h-full flex flex-col items-center justify-center bg-stone-100 text-stone-400 p-6 text-center">
+                <span className="text-xs uppercase tracking-wider font-medium text-stone-500">
+                  {product.category?.name || 'Studio Object'}
+                </span>
+                <span className="text-base font-semibold text-stone-700 mt-2">{product.name}</span>
+                <span className="text-xs text-stone-400 mt-1">Image preview currently unavailable</span>
+              </div>
+            )}
           </div>
 
           {/* Additional Thumbnails if available */}
@@ -175,7 +187,10 @@ export const ProductDetailsPage: React.FC = () => {
               {allImages.map((img, idx) => (
                 <button
                   key={idx}
-                  onClick={() => setSelectedImage(img)}
+                  onClick={() => {
+                    setSelectedImage(img);
+                    setImageError(false);
+                  }}
                   className={`w-20 h-20 rounded-lg overflow-hidden border-2 transition-all cursor-pointer ${
                     selectedImage === img
                       ? 'border-stone-900 shadow-xs'

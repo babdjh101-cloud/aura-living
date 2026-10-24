@@ -94,12 +94,12 @@ export async function uploadProductImage(
       if (onProgress) onProgress(100);
       return result;
     } catch (err: any) {
-      console.warn('Supabase storage upload encountered an error, attempting local preview fallback:', err);
-      // Fallback only if Supabase permissions or network fail
+      console.error('Supabase storage upload failed:', err);
+      throw new Error(`Product image upload failed: ${err.message || 'Storage error'}. Ensure the "product-images" bucket exists in Supabase Storage and administrator permissions are configured.`);
     }
   }
 
-  // 4. Local development simulation with realistic progress animation
+  // 4. Local development simulation with realistic progress animation (when Supabase is not configured)
   return new Promise((resolve, reject) => {
     let current = 20;
     const interval = setInterval(() => {

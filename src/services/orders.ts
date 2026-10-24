@@ -1,7 +1,7 @@
 import { Order, OrderStatus, CartItem } from '../types';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { INITIAL_ORDERS } from './mockData';
-import { fetchProductById, updateProduct } from './products';
+import { fetchProductById, getLocalProducts, saveLocalProducts } from './products';
 
 const ORDERS_STORAGE_KEY = 'aura_orders_cache';
 
@@ -45,55 +45,109 @@ export interface OrderSubmissionResult {
   total_amount: number;
 }
 
-export async function submitOrder(payload: SubmitOrderPayload, cartItems?: CartItem[]): Promise<OrderSubmissionResult> {
-  // If Supabase is configured, use the atomic PostgreSQL RPC function
-  if (isSupabaseConfigured()) {
-    try {
-      const { data, error } = await supabase.rpc('create_order_securely', {
-        p_customer_name: payload.customer_name,
-        p_customer_phone: payload.customer_phone,
-        p_customer_email: payload.customer_email || null,
-        p_shipping_address: payload.shipping_address,
-        p_city: payload.city,
-        p_postal_code: payload.postal_code || null,
-        p_order_notes: payload.order_notes || null,
-        p_items: payload.items,
-      });
-
-      if (!error && data && data.success) {
-        return data as OrderSubmissionResult;
-      }
-
-      if (error) {
-        console.warn('Database RPC order rejected (catalog may need seeding):', error.message);
-        // If it's a validation error about customer data or stock, throw it
-        if (error.message.includes('Customer') || error.message.includes('Shipping') || error.message.includes('City') || error.message.includes('stock')) {
-          throw new Error(error.message);
-        }
-        // If product was not found in remote DB (unseeded DB), fall through to local processing
-      }
-    } catch (err: any) {
-      if (err.message && (err.message.includes('Customer') || err.message.includes('Shipping') || err.message.includes('City') || err.message.includes('stock'))) {
-        throw err;
-      }
-      console.warn('Proceeding with fallback order checkout:', err.message || err);
-    }
+export async function submitOrder(payload: SubmitOrderPayload, _cartItems?: CartItem[]): Promise<OrderSubmissionResult> {
+  // Client pre-validation
+  if (!payload.items || payload.items.length === 0) {
+    throw new Error('Order must contain at least one item');
+  }
+  if (!payload.customer_name || !payload.customer_name.trim()) {
+    throw new Error('Customer name is required');
+  }
+  if (!payload.customer_phone || !payload.customer_phone.trim()) {
+    throw new Error('Customer phone number is required');
+  }
+  if (!payload.shipping_address || !payload.shipping_address.trim()) {
+    throw new Error('Shipping address is required');
+  }
+  if (!payload.city || !payload.city.trim()) {
+    throw new Error('City is required');
   }
 
-  // Authoritative server-style calculation fallback (for offline preview only)
+  // If Supabase is configured, execute the atomic SECURITY DEFINER PostgreSQL RPC function.
+  // This verifies prices, checks stock, creates the order, and decrements stock in a single transaction.
+  if (isSupabaseConfigured()) {
+    const { data, error } = await supabase.rpc('create_order_securely', {
+      p_customer_name: payload.customer_name.trim(),
+      p_customer_phone: payload.customer_phone.trim(),
+      p_customer_email: payload.customer_email ? payload.customer_email.trim() : null,
+      p_shipping_address: payload.shipping_address.trim(),
+      p_city: payload.city.trim(),
+      p_postal_code: payload.postal_code ? payload.postal_code.trim() : null,
+      p_order_notes: payload.order_notes ? payload.order_notes.trim() : null,
+      p_items: payload.items,
+    });
+
+    if (error) {
+      console.error('Database RPC order placement failed:', error);
+
+      // 1. Missing RPC or tables in database
+      if (
+        error.code === 'PGRST202' ||
+        error.message.includes('create_order_securely') ||
+        error.message.includes('function') ||
+        error.message.includes('does not exist')
+      ) {
+        throw new Error(
+          'Database setup required: The order function "create_order_securely" is not yet installed in Supabase. ' +
+          'Please execute migration "20261024000000_init_ecommerce.sql" (or 20261024000003_secure_orders_rpc.sql) in your Supabase SQL Editor.'
+        );
+      }
+
+      // 2. Permission denied on RPC
+      if (error.code === '42501' || error.message.includes('permission denied')) {
+        throw new Error(
+          'Database permission error: Execution of "create_order_securely" is not granted to the public anon role. ' +
+          'Please execute: GRANT EXECUTE ON FUNCTION public.create_order_securely TO anon, authenticated;'
+        );
+      }
+
+      // 3. Product not found in database (e.g. database not seeded with catalog items)
+      if (error.message.includes('not found')) {
+        throw new Error(
+          `Catalog error: ${error.message}. ` +
+          'The items in your shopping bag do not exist in the remote database. Please seed the database (migration 20261024000005_seed_data.sql) or create products via the Admin Panel.'
+        );
+      }
+
+      // 4. Stock validation errors
+      if (error.message.includes('Insufficient stock') || error.message.includes('stock')) {
+        throw new Error(error.message);
+      }
+
+      // 5. Input validation from PostgreSQL
+      if (
+        error.message.includes('Customer') ||
+        error.message.includes('Shipping') ||
+        error.message.includes('City') ||
+        error.message.includes('quantity')
+      ) {
+        throw new Error(error.message);
+      }
+
+      throw new Error(`Order placement failed: ${error.message}`);
+    }
+
+    if (data && data.success) {
+      return data as OrderSubmissionResult;
+    }
+
+    throw new Error('Order placement failed: Server did not return confirmation.');
+  }
+
+  // Offline / Demo fallback (executed ONLY when Supabase credentials are not configured)
   let calculatedSubtotal = 0;
   const orderItemsRecord: any[] = [];
+  const localProducts = getLocalProducts();
 
   for (const item of payload.items) {
-    const product = await fetchProductById(item.product_id);
+    const product = localProducts.find((p) => p.id === item.product_id);
     if (!product) {
-      throw new Error(`Product ${item.product_id} no longer exists in catalog.`);
+      throw new Error(`Product ${item.product_id} no longer exists in local catalog.`);
     }
     if (product.stock_quantity < item.quantity) {
       throw new Error(`Insufficient stock for "${product.name}". Available: ${product.stock_quantity}, requested: ${item.quantity}`);
     }
 
-    // Authoritative price check
     const unitPrice = product.discount_price ?? product.regular_price;
     const lineTotal = unitPrice * item.quantity;
     calculatedSubtotal += lineTotal;
@@ -108,13 +162,14 @@ export async function submitOrder(payload: SubmitOrderPayload, cartItems?: CartI
       line_total: lineTotal,
     });
 
-    // Safely decrement local product stock
+    // Safely decrement LOCAL storage stock directly without invoking Supabase or updateProduct
     const newStock = Math.max(0, product.stock_quantity - item.quantity);
-    await updateProduct(product.id, {
-      stock_quantity: newStock,
-      availability_status: newStock === 0 ? 'out_of_stock' : newStock <= 3 ? 'low_stock' : 'in_stock',
-    });
+    product.stock_quantity = newStock;
+    product.availability_status = newStock === 0 ? 'out_of_stock' : newStock <= 3 ? 'low_stock' : 'in_stock';
+    product.updated_at = new Date().toISOString();
   }
+
+  saveLocalProducts(localProducts);
 
   // Free delivery over $150, else $15
   const deliveryCharge = calculatedSubtotal >= 150 ? 0.00 : 15.00;
@@ -214,26 +269,50 @@ export async function fetchOrderByNumber(orderNumber: string): Promise<Order | n
 }
 
 export async function updateOrderStatus(orderId: string, status: OrderStatus): Promise<Order> {
+  if (!orderId || typeof orderId !== 'string') {
+    throw new Error('Valid Order ID is required to update order status.');
+  }
+
   if (isSupabaseConfigured()) {
     const { data, error } = await supabase
       .from('orders')
       .update({ order_status: status })
       .eq('id', orderId)
-      .select('*, order_items(*)')
-      .single();
+      .select('*, order_items(*)');
 
     if (error) {
+      if (error.code === '42501' || error.message.includes('permission denied')) {
+        throw new Error('Permission denied: Only administrators can update order statuses.');
+      }
       throw new Error(`Failed to update order status: ${error.message}`);
     }
-    return {
-      ...data,
-      items: data.order_items || [],
+
+    if (!data || data.length === 0) {
+      const { data: existing } = await supabase.from('orders').select('id, order_number').eq('id', orderId).maybeSingle();
+      if (!existing) {
+        throw new Error(`Order update failed: Order with ID "${orderId}" was not found in the database.`);
+      }
+      throw new Error('Order update failed: Permission denied by row-level security policy.');
+    }
+
+    const updated = {
+      ...data[0],
+      items: data[0].order_items || [],
     } as Order;
+
+    const orders = getLocalOrders();
+    const idx = orders.findIndex((o) => o.id === orderId);
+    if (idx !== -1) {
+      orders[idx] = updated;
+      saveLocalOrders(orders);
+    }
+
+    return updated;
   }
 
   const orders = getLocalOrders();
   const idx = orders.findIndex((o) => o.id === orderId);
-  if (idx === -1) throw new Error('Order not found');
+  if (idx === -1) throw new Error(`Order not found: ID "${orderId}" does not exist in local cache.`);
 
   orders[idx] = {
     ...orders[idx],
