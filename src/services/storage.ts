@@ -94,12 +94,21 @@ export async function uploadProductImage(
       if (onProgress) onProgress(100);
       return result;
     } catch (err: any) {
-      console.error('Supabase storage upload failed:', err);
+      console.warn('Supabase storage upload failed:', err);
+      const isLocalAdmin = typeof window !== 'undefined' && Boolean(localStorage.getItem('aura_local_admin_session'));
+      if (isLocalAdmin) {
+        console.info('Falling back to local preview image reader for demo session.');
+        return readAsLocalPreview(file, onProgress);
+      }
       throw new Error(`Product image upload failed: ${err.message || 'Storage error'}. Ensure the "product-images" bucket exists in Supabase Storage and administrator permissions are configured.`);
     }
   }
 
   // 4. Local development simulation with realistic progress animation (when Supabase is not configured)
+  return readAsLocalPreview(file, onProgress);
+}
+
+function readAsLocalPreview(file: File, onProgress?: (percent: number) => void): Promise<UploadResult> {
   return new Promise((resolve, reject) => {
     let current = 20;
     const interval = setInterval(() => {
@@ -120,7 +129,7 @@ export async function uploadProductImage(
         };
         reader.readAsDataURL(file);
       }
-    }, 60);
+    }, 40);
   });
 }
 

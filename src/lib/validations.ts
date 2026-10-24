@@ -13,6 +13,7 @@ export function validateCheckoutForm(data: {
   customer_email?: string;
   shipping_address: string;
   city: string;
+  postal_code?: string;
 }): { isValid: boolean; errors: CheckoutFormErrors } {
   const errors: CheckoutFormErrors = {};
 

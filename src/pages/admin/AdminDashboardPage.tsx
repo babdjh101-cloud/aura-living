@@ -9,13 +9,21 @@ import {
   ArrowRight,
   TrendingUp,
   RefreshCw,
+  Database,
+  Sparkles,
+  Check,
 } from 'lucide-react';
-import { getAdminMetrics, AdminMetrics } from '../../services/admin';
+import { getAdminMetrics, AdminMetrics, seedSupabaseInitialData } from '../../services/admin';
+import { isSupabaseConfigured } from '../../lib/supabase';
 import { formatCurrency, formatDateTime, formatOrderStatus } from '../../lib/formatters';
 
 export const AdminDashboardPage: React.FC = () => {
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSeeding, setIsSeeding] = useState(false);
+  const [seedResult, setSeedResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const isConfigured = isSupabaseConfigured();
 
   const loadMetrics = async () => {
     setIsLoading(true);
@@ -26,6 +34,20 @@ export const AdminDashboardPage: React.FC = () => {
       console.error('Failed to load admin metrics:', err);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleSeedDatabase = async () => {
+    setIsSeeding(true);
+    setSeedResult(null);
+    try {
+      const res = await seedSupabaseInitialData();
+      setSeedResult(res);
+      await loadMetrics();
+    } catch (err: any) {
+      setSeedResult({ success: false, message: err.message || 'Seeding failed' });
+    } finally {
+      setIsSeeding(false);
     }
   };
 
@@ -110,6 +132,46 @@ export const AdminDashboardPage: React.FC = () => {
           </Link>
         </div>
       </div>
+
+      {/* Supabase Status & Quick Seed Helper Banner */}
+      {isConfigured && (
+        <div className="p-4 sm:p-5 bg-stone-900 text-stone-100 rounded-xl border border-stone-800 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="p-2 rounded-lg bg-stone-800 text-emerald-400 shrink-0 mt-0.5">
+              <Database className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-stone-300">
+                  Supabase Live Connection
+                </span>
+                <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+              </div>
+              <p className="text-xs text-stone-400 mt-0.5 max-w-xl leading-relaxed">
+                {metrics.totalProducts > 0
+                  ? `Active catalog synchronized with ${metrics.totalProducts} pieces.`
+                  : 'Your Supabase tables are ready. Click the seed button below to populate the sample catalogue into PostgreSQL.'}
+              </p>
+              {seedResult && (
+                <p className={`text-xs mt-1.5 font-medium ${seedResult.success ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {seedResult.message}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 shrink-0">
+            <button
+              onClick={handleSeedDatabase}
+              disabled={isSeeding}
+              className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-stone-950 bg-white hover:bg-stone-200 rounded-lg transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-stone-900" />
+              <span>{isSeeding ? 'Populating Database...' : 'Seed Catalog to Supabase'}</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Metric Cards Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">

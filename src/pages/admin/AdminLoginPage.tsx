@@ -4,12 +4,14 @@ import { Shield, Lock, Mail, ArrowRight, AlertCircle, Info, Database } from 'luc
 import { useAuth } from '../../context/AuthContext';
 
 export const AdminLoginPage: React.FC = () => {
-  const { signIn, user, isAdmin, isConfigured } = useAuth();
+  const { signIn, signUpAdmin, signInDemo, user, isAdmin, isConfigured } = useAuth();
   const navigate = useNavigate();
 
+  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   // If already logged in as admin, redirect to dashboard
@@ -22,20 +24,39 @@ export const AdminLoginPage: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setInfoMessage(null);
     setIsLoading(true);
 
     try {
-      const result = await signIn(email, password);
-      if (result.success) {
-        navigate('/admin');
+      if (mode === 'signup') {
+        const result = await signUpAdmin(email, password);
+        if (result.success) {
+          if (result.message) setInfoMessage(result.message);
+          // If already authenticated by signup
+          if (user && isAdmin) {
+            navigate('/admin');
+          }
+        } else {
+          setError(result.error || 'Registration failed.');
+        }
       } else {
-        setError(result.error || 'Authentication rejected.');
+        const result = await signIn(email, password);
+        if (result.success) {
+          navigate('/admin');
+        } else {
+          setError(result.error || 'Authentication rejected.');
+        }
       }
     } catch (err: any) {
       setError(err.message || 'An unexpected authentication error occurred.');
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleDemoLogin = () => {
+    signInDemo();
+    navigate('/admin');
   };
 
   return (
@@ -54,10 +75,51 @@ export const AdminLoginPage: React.FC = () => {
 
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0">
         <div className="bg-stone-900/90 border border-stone-800 py-8 px-6 shadow-2xl rounded-2xl sm:px-10">
+          {/* Mode Tabs */}
+          <div className="flex border-b border-stone-800 mb-6 pb-2 gap-4 text-xs font-medium">
+            <button
+              type="button"
+              onClick={() => {
+                setMode('signin');
+                setError(null);
+                setInfoMessage(null);
+              }}
+              className={`pb-2 border-b-2 transition-colors cursor-pointer ${
+                mode === 'signin'
+                  ? 'border-white text-white font-semibold'
+                  : 'border-transparent text-stone-400 hover:text-stone-300'
+              }`}
+            >
+              Sign In to Console
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMode('signup');
+                setError(null);
+                setInfoMessage(null);
+              }}
+              className={`pb-2 border-b-2 transition-colors cursor-pointer ${
+                mode === 'signup'
+                  ? 'border-white text-white font-semibold'
+                  : 'border-transparent text-stone-400 hover:text-stone-300'
+              }`}
+            >
+              Register New Admin
+            </button>
+          </div>
+
           {error && (
             <div className="mb-6 p-3.5 bg-rose-950/60 border border-rose-800/80 rounded-xl flex items-start gap-3 text-rose-200 text-xs">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
               <span>{error}</span>
+            </div>
+          )}
+
+          {infoMessage && (
+            <div className="mb-6 p-3.5 bg-emerald-950/60 border border-emerald-800/80 rounded-xl flex items-start gap-3 text-emerald-200 text-xs">
+              <Info className="w-4 h-4 shrink-0 mt-0.5 text-emerald-400" />
+              <span>{infoMessage}</span>
             </div>
           )}
 
@@ -88,6 +150,7 @@ export const AdminLoginPage: React.FC = () => {
                 <input
                   type="password"
                   required
+                  minLength={6}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••••••"
@@ -101,13 +164,31 @@ export const AdminLoginPage: React.FC = () => {
               disabled={isLoading}
               className="w-full mt-2 py-3 px-4 rounded-lg text-xs font-semibold text-stone-950 bg-white hover:bg-stone-200 transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-xs disabled:opacity-50"
             >
-              <span>{isLoading ? 'Verifying Credentials...' : 'Authenticate & Enter Console'}</span>
+              <span>
+                {isLoading
+                  ? 'Processing...'
+                  : mode === 'signup'
+                  ? 'Register Admin Account'
+                  : 'Authenticate & Enter Console'}
+              </span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </form>
 
+          {/* Quick Demo Access Button */}
+          <div className="mt-4 pt-4 border-t border-stone-800/80">
+            <button
+              type="button"
+              onClick={handleDemoLogin}
+              className="w-full py-2.5 px-3 rounded-lg text-xs font-medium text-stone-300 bg-stone-800/60 hover:bg-stone-800 hover:text-white transition-colors flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <span>Instant Preview Access (Bypass Supabase Auth)</span>
+              <ArrowRight className="w-3.5 h-3.5 text-stone-400" />
+            </button>
+          </div>
+
           {/* Database & Setup Guide */}
-          <div className="mt-8 pt-6 border-t border-stone-800 space-y-3">
+          <div className="mt-6 pt-4 border-t border-stone-800 space-y-3">
             <div className="flex items-center gap-2 text-xs text-stone-400 font-medium">
               <Database className="w-3.5 h-3.5" />
               <span>Supabase Status: {isConfigured ? 'Active Project Configured' : 'Local Fallback Mode'}</span>
@@ -131,7 +212,7 @@ export const AdminLoginPage: React.FC = () => {
               </div>
             ) : (
               <p className="text-[11px] text-stone-400 leading-relaxed">
-                Log in with your registered Supabase administrator email and password. Your user ID must exist in the <code className="text-stone-300">admin_users</code> table to satisfy RLS authorization policies.
+                Connected to Supabase. To log in with your personal credentials, sign up above or add your email to Supabase Authentication. Or click <strong>Instant Preview Access</strong> to review management tools right now.
               </p>
             )}
 

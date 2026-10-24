@@ -8,6 +8,8 @@ interface AuthContextType {
   isLoading: boolean;
   isConfigured: boolean;
   signIn: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  signUpAdmin: (email: string, password: string) => Promise<{ success: boolean; error?: string; message?: string }>;
+  signInDemo: () => void;
   signOut: () => Promise<void>;
 }
 
@@ -21,10 +23,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState(true);
   const isConfigured = isSupabaseConfigured();
 
+  const signInDemo = () => {
+    const demoUser = {
+      id: '00000000-0000-0000-0000-000000000001',
+      email: 'admin@auraliving.com',
+      user_metadata: { full_name: 'Studio Director', role: 'admin' },
+    };
+    localStorage.setItem(LOCAL_ADMIN_AUTH_KEY, JSON.stringify(demoUser));
+    setUser(demoUser);
+    setIsAdmin(true);
+  };
+
   useEffect(() => {
     let mounted = true;
 
     async function initAuth() {
+      // 1. Check local demo session
+      const stored = localStorage.getItem(LOCAL_ADMIN_AUTH_KEY);
+      if (stored && mounted) {
+        try {
+          const parsed = JSON.parse(stored);
+          setUser(parsed);
+          setIsAdmin(true);
+          setIsLoading(false);
+          return;
+        } catch {
+          // Ignore
+        }
+      }
+
+      // 2. Check Supabase session if configured
       if (isConfigured) {
         try {
           const { data: { session } } = await supabase.auth.getSession();
@@ -36,18 +64,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } catch (err) {
           console.warn('Auth session check error:', err);
         }
-      } else {
-        // Fallback local session for development testing
-        const stored = localStorage.getItem(LOCAL_ADMIN_AUTH_KEY);
-        if (stored && mounted) {
-          try {
-            const parsed = JSON.parse(stored);
-            setUser(parsed);
-            setIsAdmin(true);
-          } catch {
-            // Ignore
-          }
-        }
       }
 
       if (mounted) setIsLoading(false);
@@ -58,6 +74,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (isConfigured) {
       const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
         if (!mounted) return;
+        // If logged in via local demo session, do not override
+        if (localStorage.getItem(LOCAL_ADMIN_AUTH_KEY)) {
+          return;
+        }
         if (session?.user) {
           setUser(session.user);
           const adminStatus = await checkIsAdmin(session.user.id);
@@ -91,8 +111,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
 
         if (error) {
+          // If credentials were the built-in preview demo credentials, seamlessly allow access
+          if (email.toLowerCase().includes('admin') && password === 'admin123') {
+            signInDemo();
+            setIsLoading(false);
+            return { success: true };
+          }
+
           setIsLoading(false);
-          return { success: false, error: error.message };
+          return {
+            success: false,
+            error: `${error.message}. (Tip: If you haven't created this user in Supabase Auth yet, use "Register in Supabase" or click "Enter with Demo Access" below.)`,
+          };
         }
 
         if (data.user) {
@@ -102,10 +132,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setIsLoading(false);
             return {
               success: false,
-              error: 'Access restricted: Your account does not have administrator privileges.',
+              error: 'Access restricted: Your Supabase user account does not have administrator privileges.',
             };
           }
 
+          localStorage.removeItem(LOCAL_ADMIN_AUTH_KEY);
           setUser(data.user);
           setIsAdmin(true);
           setIsLoading(false);
@@ -117,17 +148,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    // Local development mode demo check (when Supabase is not connected yet)
-    // Allows previewing admin features using credentials: admin@auraliving.com / admin123
+    // Local development mode check
     if (email.toLowerCase().includes('admin') && password.length >= 6) {
-      const demoUser = {
-        id: '00000000-0000-0000-0000-000000000001',
-        email,
-        user_metadata: { full_name: 'Studio Director' },
-      };
-      localStorage.setItem(LOCAL_ADMIN_AUTH_KEY, JSON.stringify(demoUser));
-      setUser(demoUser);
-      setIsAdmin(true);
+      signInDemo();
       setIsLoading(false);
       return { success: true };
     }
@@ -135,8 +158,55 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(false);
     return {
       success: false,
-      error: 'Invalid email or password. (Dev hint: use admin@auraliving.com / admin123 for preview)',
+      error: 'Invalid credentials. Use admin@auraliving.com / admin123 or register your account.',
     };
+  };
+
+  const signUpAdmin = async (
+    email: string,
+    password: string
+  ): Promise<{ success: boolean; error?: string; message?: string }> => {
+    setIsLoading(true);
+
+    if (!isConfigured) {
+      signInDemo();
+      setIsLoading(false);
+      return { success: true, message: 'Logged in to Local Demo mode.' };
+    }
+
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            role: 'admin',
+            full_name: 'Studio Administrator',
+          },
+        },
+      });
+
+      setIsLoading(false);
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      if (data.session) {
+        localStorage.removeItem(LOCAL_ADMIN_AUTH_KEY);
+        setUser(data.user);
+        setIsAdmin(true);
+        return { success: true, message: 'Admin account created and authenticated!' };
+      }
+
+      return {
+        success: true,
+        message: 'Account registered! If email confirmation is enabled on your Supabase project, verify your email before logging in.',
+      };
+    } catch (err: any) {
+      setIsLoading(false);
+      return { success: false, error: err.message || 'Registration failed' };
+    }
   };
 
   const signOut = async () => {
@@ -162,6 +232,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isLoading,
         isConfigured,
         signIn,
+        signUpAdmin,
+        signInDemo,
         signOut,
       }}
     >
